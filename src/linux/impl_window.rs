@@ -3,8 +3,8 @@ use std::str;
 use xcb::{
     x::{
         Atom, Drawable, GetGeometry, GetProperty, GetPropertyReply, InternAtom, QueryPointer,
-        TranslateCoordinates, Window, ATOM_ATOM, ATOM_NONE, ATOM_STRING, ATOM_WM_CLASS,
-        ATOM_WM_NAME,
+        TranslateCoordinates, Window, ATOM_ATOM, ATOM_NONE, ATOM_STRING, ATOM_WINDOW,
+        ATOM_WM_CLASS, ATOM_WM_NAME,
     },
     Connection, Xid,
 };
@@ -26,6 +26,7 @@ pub(crate) struct ImplWindow {
     pub height: u32,
     pub is_minimized: bool,
     pub is_maximized: bool,
+    pub is_focused: bool,
 }
 
 fn get_atom(conn: &Connection, name: &str) -> XCapResult<Atom> {
@@ -70,11 +71,31 @@ impl ImplWindow {
         conn: &Connection,
         window: &Window,
         impl_monitors: &Vec<ImplMonitor>,
+        root_window: Window,
     ) -> XCapResult<ImplWindow> {
         let title = {
-            let get_title_reply =
-                get_window_property(conn, *window, ATOM_WM_NAME, ATOM_STRING, 0, 1024)?;
-            str::from_utf8(get_title_reply.value())?.to_string()
+            // Attempt to get the title using _NET_WM_NAME with UTF-8 support
+            let utf8_string_atom = get_atom(conn, "UTF8_STRING").unwrap_or(ATOM_STRING);
+            let title_result = get_window_property(
+                conn,
+                *window,
+                get_atom(conn, "_NET_WM_NAME")?,
+                utf8_string_atom,
+                0,
+                1024,
+            )
+            .and_then(|reply| Ok(str::from_utf8(reply.value())?.to_string()))
+            .or_else(|_| {
+                // Fallback to WM_NAME if there was an issue getting _NET_WM_NAME or the string is empty
+                get_window_property(conn, *window, ATOM_WM_NAME, ATOM_STRING, 0, 1024).and_then(
+                    |fallback_reply| Ok(str::from_utf8(fallback_reply.value())?.to_string()),
+                )
+            });
+
+            match title_result {
+                Ok(title) if !title.is_empty() => title,
+                _ => String::new(), // Return an empty string if all attempts fail or result in an empty string
+            }
         };
 
         let app_name = {
@@ -167,6 +188,17 @@ impl ImplWindow {
             )
         };
 
+        // Determine if the window is focused
+        let active_window_atom = get_atom(conn, "_NET_ACTIVE_WINDOW")?;
+        let active_window_prop =
+            get_window_property(conn, root_window, active_window_atom, ATOM_WINDOW, 0, 1)?;
+        let active_window_id = active_window_prop.value::<Window>().get(0).copied();
+
+        let is_focused = match active_window_id {
+            Some(active_id) => *window == active_id,
+            None => false,
+        };
+
         Ok(ImplWindow {
             window: *window,
             id: window.resource_id(),
@@ -179,6 +211,7 @@ impl ImplWindow {
             height,
             is_minimized,
             is_maximized,
+            is_focused,
         })
     }
 
@@ -205,7 +238,7 @@ impl ImplWindow {
                     get_window_property(&conn, root_window, client_list_atom, ATOM_NONE, 0, 100)?;
 
                 for client in list_window_reply.value::<Window>() {
-                    impl_windows.push(ImplWindow::new(&conn, client, &impl_monitors)?);
+                    impl_windows.push(ImplWindow::new(&conn, client, &impl_monitors, root_window)?);
                 }
             }
         }

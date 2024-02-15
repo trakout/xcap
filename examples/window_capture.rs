@@ -25,7 +25,8 @@ fn main() {
             "Window: {:?} {:?} {:?}",
             window.title(),
             (window.x(), window.y(), window.width(), window.height()),
-            (window.is_minimized(), window.is_maximized())
+            (window.is_minimized(), window.is_maximized()),
+            (window.is_focused())
         );
 
         let image = window.capture_image().unwrap();
